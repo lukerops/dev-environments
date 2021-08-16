@@ -1,0 +1,62 @@
+FROM python:3.9.5-slim
+
+## IMAGE REQUIREMENTS
+
+ARG TIMEZONE="America/Sao_Paulo"
+ARG USERNAME
+ARG UID
+ARG GROUPNAME
+ARG GID
+
+# softwares requirements
+RUN apt update && \
+    apt upgrade -y && \
+    apt install -y \
+        curl \
+	wget \
+        git \
+	openssh-client \
+	tmux \
+	flatpak-xdg-utils \
+	sudo \
+	bash \
+	bash-completion \
+	build-essential \
+	fuse \
+	ncurses-term && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -s https://raw.githubusercontent.com/containers/podman/main/completions/bash/podman | \
+    sed "s/podman/docker/g" | \
+    tee /usr/share/bash-completion/completions/docker
+
+# set timezone
+RUN echo "$TIMEZONE" > /etc/timezone
+
+# add user
+RUN groupadd --gid $GID $GROUPNAME && \
+    useradd --create-home --shell /bin/bash --uid $UID --gid $GID $USERNAME
+RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}_user
+USER $USERNAME
+WORKDIR /home/$USERNAME
+RUN mkdir -p /home/$USERNAME/.local/bin /home/$USERNAME/.local/lib /home/$USERNAME/.local/share
+ENV PATH=/home/$USERNAME/.local/bin:$PATH
+
+ENV TERM=xterm-256color
+CMD ["tail", "-f", "/dev/null"]
+
+## PROJECT REQUIREMENTS
+
+# softwares requirements
+RUN sudo apt update && \
+    sudo apt install -y \
+        libpq-dev && \
+    sudo rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir --upgrade setuptools wheel
+RUN pip install --no-cache-dir --upgrade poetry
+RUN poetry config virtualenvs.create false
+
+RUN mkdir /home/$USERNAME/chargeback-notifications
+WORKDIR /home/$USERNAME/chargeback-notifications
