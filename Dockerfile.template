@@ -10,6 +10,9 @@ ARG GROUPNAME
 ARG GID
 ARG PROJECT_NAME
 
+# add docker group
+RUN if [ ! -z "$DOCKER_GID" ];then groupadd --gid $DOCKER_GID docker; fi
+
 # softwares requirements
 RUN apt update && \
     apt upgrade -y && \
@@ -36,8 +39,8 @@ RUN apt update && \
 RUN echo "$TIMEZONE" > /etc/timezone
 
 # add user
-RUN groupadd --gid $GID $GROUPNAME && \
-    useradd --create-home --shell /bin/bash --uid $UID --gid $GID $USERNAME
+RUN groupadd --gid $GID $GROUPNAME &&\
+    useradd --create-home --shell /bin/bash --uid $UID --gid $GID --groups docker $USERNAME
 RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}_user
 USER $USERNAME
 RUN mkdir -p /home/$USERNAME/.local/bin /home/$USERNAME/.local/lib /home/$USERNAME/.local/share /home/$USERNAME/$PROJECT_NAME

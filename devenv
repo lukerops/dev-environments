@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/env bash
 
 #set -x
 VERSION='v0.1'
@@ -47,20 +47,20 @@ function container_instance_filter() {
 function container_get_project_dir() {
   local PROJECT_NAME=$1
   local CONTAINER_NAME=devenv-$PROJECT_NAME
-  echo $(container_exec inspect --format="{{range .Mounts }}{{ .Source }} {{end}}" $CONTAINER_NAME | grep -oP "(/\S*/home/\S*/$PROJECT_NAME)")
+  echo $(container_exec inspect --format="{{range .Mounts }}{{ .Source }} {{end}}" $CONTAINER_NAME | grep -oP "(\S*/$PROJECT_NAME)")
 }
 
 function environment_create() {
   local PROJECT_NAME=$1
+  local IMAGE_PATH=$2
   local CONTAINER_IMAGE=devenv:$PROJECT_NAME
   
   if [ ! -z "$(container_image_filter $CONTAINER_IMAGE)" ]; then
     container_exec rmi $CONTAINER_IMAGE
   fi
   
-  if [ ! -e "./images/pagarme/Dockerfile.$PROJECT_NAME" ]; then
-    echo "Dockerfile \"$(pwd)/images/pagarme/Dockerfile.$PROJECT_NAME\" not found!"
-    exit 1
+  if [ -z "$(which podman)" ]; then
+    local DOCKER_GID=$(getent group docker | cut -d: -f3)
   fi
   
   container_exec build \
@@ -68,20 +68,29 @@ function environment_create() {
     --build-arg UID=$(id -u) \
     --build-arg GROUPNAME=$(id -ng) \
     --build-arg GID=$(id -g) \
+    --build-arg DOCKER_GID=$DOCKER_GID \
     --build-arg PROJECT_NAME=$PROJECT_NAME \
     --tag $CONTAINER_IMAGE \
-    --file ./images/pagarme/Dockerfile.$PROJECT_NAME
+    --file $IMAGE_PATH \
+    $(pwd)
 }
 
 function environment_instantiate() {
   local PROJECT_NAME=$1
   local PROJECT_DIR=$2
-  local EXTRA_PARAMS=$3
+  local IMAGE_PATH=$3
+  local EXTRA_PARAMS=$4
   local CONTAINER_IMAGE=devenv:$PROJECT_NAME
   local CONTAINER_NAME=devenv-$PROJECT_NAME
 
+  if [ ! -z "$(which podman)" ]; then
+    local USERNS='keep-id'
+  else
+    local USERNS='host'
+  fi
+
   environment_remove $PROJECT_NAME
-  environment_create $PROJECT_NAME
+  environment_create $PROJECT_NAME $IMAGE_PATH
   
   # --env XDG_RUNTIME_DIR=/run/user/1000 \
   # --volume /run/user/1000:/run/user/1000 \
@@ -93,15 +102,14 @@ function environment_instantiate() {
     --hostname devenv \
     --ipc host \
     --pid host \
-    --ulimit host \
-    --userns keep-id \
+    --userns $USERNS \
     --user $(id -u):$(id -g) \
     --privileged \
     --volume $PROJECT_DIR:/home/$USER/$PROJECT_NAME \
     --volume $HOME/.ssh:/home/$USER/.ssh \
     --volume $(container_sock_path):/var/run/docker.sock \
     --volume /tmp/.X11-unix:/tmp/.X11-unix \
-    $3 \
+    $EXTRA_PARAMS \
     $CONTAINER_IMAGE
 }
 
@@ -130,7 +138,7 @@ function environment_enter() {
     --interactive \
     --tty \
     --env-file $(container_get_project_dir $PROJECT_NAME)/.env \
-    --user $(id -u):$(id -g) \
+    --user $(id -u) \
     $CONTAINER_NAME \
     $CMD
 }
@@ -152,25 +160,32 @@ function environment_remove() {
 }
 
 function create() {
-  local EXTRA_PARAMS=''
-  
   while [[ "$#" -gt 0 ]]; do
     case $1 in
       -p|--project)
         local PROJECT_NAME=$2
+        shift
         ;;
 
       -d|--directory)
         local PROJECT_DIR=$2
+        shift
         ;;
         
       --build-args)
-        EXTRA_PARAMS="--build-args $2 $EXTRA_PARAMS"
+        local EXTRA_PARAMS="--build-args $2 $EXTRA_PARAMS"
+        shift
         ;;
 
       -v|--volume)
-        EXTRA_PARAMS="--volume $2 $EXTRA_PARAMS"
-        ;;      
+        local EXTRA_PARAMS="--volume $2 $EXTRA_PARAMS"
+        shift
+        ;;
+        
+      *)
+        local IMAGE_PATH=$1
+        shift
+        ;;
     esac
     shift
   done
@@ -185,7 +200,17 @@ function create() {
     exit 1
   fi
   
-  environment_instantiate $PROJECT_NAME $PROJECT_DIR "$EXTRA_PARAMS"
+  if [ -z "$IMAGE_PATH" ]; then
+    echo 'You need to pass the Dockerfile to build the environment'
+    exit 1
+  fi
+  
+  if [ ! -e "$IMAGE_PATH" ]; then
+    echo "Dockerfile \"$IMAGE_PATH\" not found!"
+    exit 1
+  fi
+  
+  environment_instantiate $PROJECT_NAME $PROJECT_DIR $IMAGE_PATH "$EXTRA_PARAMS"
 }
 
 function enter() {
@@ -298,11 +323,11 @@ function help() {
       echo 'Create the environment by a Dockerfile'
       echo
       echo 'Usage:'
-      echo '  devenv create [options]'
+      echo '  devenv create [options] IMAGE'
       echo
       echo 'Example:'
-      echo '  devenv create -p test-project -d /home/user/project'
-      echo '  devenv create -p test-project -d /home/user/project -v /home/user:/host_home'
+      echo '  devenv create -p test-project -d /home/user/project ./Dockerfile'
+      echo '  devenv create -p test-project -d /home/user/project -v /home/user:/host_home ./Dockerfile'
       echo
       echo 'Options:'
       echo -e '  -p, --project string\t\t\tDefine the project name'
