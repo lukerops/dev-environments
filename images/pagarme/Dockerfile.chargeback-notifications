@@ -14,6 +14,8 @@ ARG PROJECT_NAME
 RUN apt update && \
     apt upgrade -y && \
     apt install -y \
+        procps \
+        keychain \
         curl \
         wget \
         git \
@@ -30,10 +32,6 @@ RUN apt update && \
         docker-compose && \
     rm -rf /var/lib/apt/lists/*
 
-# RUN curl -s https://raw.githubusercontent.com/containers/podman/main/completions/bash/podman | \
-#     sed "s/podman/docker/g" | \
-#     tee /usr/share/bash-completion/completions/docker
-
 # set timezone
 RUN echo "$TIMEZONE" > /etc/timezone
 
@@ -46,8 +44,7 @@ RUN mkdir -p /home/$USERNAME/.local/bin /home/$USERNAME/.local/lib /home/$USERNA
 WORKDIR /home/$USERNAME/$PROJECT_NAME
 ENV PATH=/home/$USERNAME/.local/bin:$PATH
 RUN echo '\n\
-eval "$(ssh-agent -s)"\n\
-ssh-add $(ls ~/.ssh/id* | grep -oP "([^\s]*id[^\s]*[^\.pub])" | uniq)\n\
+eval "keychain --eval --agents ssh $(ls ~/.ssh/id* | grep -oP "([^\s]*id[^\s]*[^\.pub])" | uniq | cut -d"/" -f5)"\n\
 ' >> /home/$USERNAME/.bashrc
 
 ENV TERM=xterm-256color
