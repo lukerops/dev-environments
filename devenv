@@ -1,0 +1,370 @@
+#!/bin/sh
+
+#set -x
+VERSION='v0.1'
+
+function container_sock_path() {
+  if [ ! -z "$(which docker)" ] && [ -e '/var/run/docker.sock' ]; then
+    echo '/var/run/docker.sock'
+    return
+  elif [ ! -z "$(which podman)" ]; then
+    if [ -e '/var/run/user/1000/podman/podman.sock' ]; then
+      echo '/var/run/user/1000/podman/podman.sock'
+      return
+    else
+      echo 'podman socket not found! Please run "systemctl --user enable --now podman.socket"'
+      exit 1
+    fi
+  fi
+  echo 'docker socket not found! try enable docker or reinstall'
+  exit 1
+}
+
+function container_exec() {
+  if [ ! -z "$(which docker)" ]; then
+    docker "$@"
+  elif [ ! -z "$(which podman)" ]; then
+    podman "$@"
+  fi
+}
+
+function container_image_filter() {
+  local IMAGE=$1
+  container_exec images --filter="reference=$IMAGE" --format="{{ index .Names 0 }}"
+}
+
+function container_instance_filter() {
+  local CONTAINER=$1
+  local ALL=${2:-false}
+  
+  if [ "$ALL" = "true" ]; then
+    container_exec ps --all --filter="name=$CONTAINER" --format="{{.Names}}"
+  else
+    container_exec ps --filter="name=$CONTAINER" --format="{{.Names}}"
+  fi
+}
+
+function container_get_project_dir() {
+  local PROJECT_NAME=$1
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+  echo $(container_exec inspect --format="{{range .Mounts }}{{ .Source }} {{end}}" $CONTAINER_NAME | grep -oP "(/\S*/home/\S*/$PROJECT_NAME)")
+}
+
+function environment_create() {
+  local PROJECT_NAME=$1
+  local CONTAINER_IMAGE=devenv:$PROJECT_NAME
+  
+  if [ ! -z "$(container_image_filter $CONTAINER_IMAGE)" ]; then
+    container_exec rmi $CONTAINER_IMAGE
+  fi
+  
+  if [ ! -e "./images/pagarme/Dockerfile.$PROJECT_NAME" ]; then
+    echo "Dockerfile \"$(pwd)/images/pagarme/Dockerfile.$PROJECT_NAME\" not found!"
+    exit 1
+  fi
+  
+  container_exec build \
+    --build-arg USERNAME=$(id -nu) \
+    --build-arg UID=$(id -u) \
+    --build-arg GROUPNAME=$(id -ng) \
+    --build-arg GID=$(id -g) \
+    --build-arg PROJECT_NAME=$PROJECT_NAME \
+    --tag $CONTAINER_IMAGE \
+    --file ./images/pagarme/Dockerfile.$PROJECT_NAME
+}
+
+function environment_instantiate() {
+  local PROJECT_NAME=$1
+  local PROJECT_DIR=$2
+  local EXTRA_PARAMS=$3
+  local CONTAINER_IMAGE=devenv:$PROJECT_NAME
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+
+  environment_remove $PROJECT_NAME
+  environment_create $PROJECT_NAME
+  
+  # --env XDG_RUNTIME_DIR=/run/user/1000 \
+  # --volume /run/user/1000:/run/user/1000 \
+  container_exec create \
+    --env TERM=xterm-256color \
+    --env DISPLAY=$DISPLAY \
+    --name $CONTAINER_NAME \
+    --network host \
+    --hostname devenv \
+    --ipc host \
+    --pid host \
+    --ulimit host \
+    --userns keep-id \
+    --user $(id -u):$(id -g) \
+    --privileged \
+    --volume $PROJECT_DIR:/home/$USER/$PROJECT_NAME \
+    --volume $HOME/.ssh:/home/$USER/.ssh \
+    --volume $(container_sock_path):/var/run/docker.sock \
+    --volume /tmp/.X11-unix:/tmp/.X11-unix \
+    $3 \
+    $CONTAINER_IMAGE
+}
+
+function environment_start() {
+  local PROJECT_NAME=$1
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+
+  container_exec start $CONTAINER_NAME
+}
+
+function environment_stop() {
+  local PROJECT_NAME=$1
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+  
+  if [ ! -z "$(container_instance_filter $CONTAINER_NAME)" ]; then
+    container_exec stop $CONTAINER_NAME
+  fi
+}
+
+function environment_enter() {
+  local PROJECT_NAME=$1
+  local CMD=${2:-/bin/bash}
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+
+  container_exec exec \
+    --interactive \
+    --tty \
+    --env-file $(container_get_project_dir $PROJECT_NAME)/.env \
+    --user $(id -u):$(id -g) \
+    $CONTAINER_NAME \
+    $CMD
+}
+
+function environment_remove() {
+  local PROJECT_NAME=$1
+  local CONTAINER_IMAGE=devenv:$PROJECT_NAME
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+  
+  environment_stop $PROJECT_NAME
+  
+  if [ ! -z "$(container_instance_filter $CONTAINER_NAME true)" ]; then
+    container_exec rm $CONTAINER_NAME
+  fi
+  
+  if [ ! -z "$(container_image_filter $CONTAINER_IMAGE)" ]; then
+    container_exec rmi $CONTAINER_IMAGE
+  fi
+}
+
+function create() {
+  local EXTRA_PARAMS=''
+  
+  while [[ "$#" -gt 0 ]]; do
+    case $1 in
+      -p|--project)
+        local PROJECT_NAME=$2
+        ;;
+
+      -d|--directory)
+        local PROJECT_DIR=$2
+        ;;
+        
+      --build-args)
+        EXTRA_PARAMS="--build-args $2 $EXTRA_PARAMS"
+        ;;
+
+      -v|--volume)
+        EXTRA_PARAMS="--volume $2 $EXTRA_PARAMS"
+        ;;      
+    esac
+    shift
+  done
+  
+  if [ -z "$PROJECT_NAME" ]; then
+    echo 'You need to pass a project name'
+    exit 1
+  fi
+  
+  if [ -z "$PROJECT_DIR" ]; then
+    echo 'You need to pass a directory to mount inside the environment'
+    exit 1
+  fi
+  
+  environment_instantiate $PROJECT_NAME $PROJECT_DIR "$EXTRA_PARAMS"
+}
+
+function enter() {
+  local PROJECT_NAME=$1
+  local CMD=''
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+  
+  if [ "$2" = "--cmd" ]; then
+    shift
+    shift
+    CMD=$@
+  fi
+
+  if [ -z "$(container_instance_filter $CONTAINER_NAME true)" ]; then
+    echo 'Environment not found! Please use "devenv create" to create an environment'
+    exit 1
+  fi
+  
+  environment_start $PROJECT_NAME
+  environment_enter $PROJECT_NAME "$CMD"
+}
+
+function start() {
+  local PROJECT_NAME=$1
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+
+  if [ -z "$(container_instance_filter $CONTAINER_NAME true)" ]; then
+    echo 'Environment not found! Please use "devenv create" to create an environment'
+    exit 1
+  fi
+  
+  environment_start $PROJECT_NAME
+}
+
+function stop() {
+  local PROJECT_NAME=$1
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+
+  if [ -z "$(container_instance_filter $CONTAINER_NAME)" ]; then
+    echo 'Environment not instantiated!'
+    exit 1
+  fi
+  
+  environment_stop $PROJECT_NAME
+}
+
+function remove() {
+  local PROJECT_NAME=$1
+  local CONTAINER_NAME=devenv-$PROJECT_NAME
+
+  if [ -z "$(container_instance_filter $CONTAINER_NAME true)" ]; then
+    echo 'Environment not instantiated!'
+    exit 1
+  fi
+  
+  environment_remove $PROJECT_NAME
+}
+
+function help() {
+  case $1 in
+    enter)
+      echo 'Enter the environment'
+      echo
+      echo 'Usage:'
+      echo '  devenv enter PROJECT_NAME [options]'
+      echo
+      echo 'Example:'
+      echo '  devenv enter test'
+      echo '  devenv enter test --cmd bash'
+      echo
+      echo 'Options:'
+      echo -e '  --cmd\t\tCommand to run inside the environment'
+      echo
+      ;;
+
+    start)
+      echo 'Start the environment in the background'
+      echo
+      echo 'Usage:'
+      echo '  devenv start PROJECT_NAME'
+      echo
+      echo 'Example:'
+      echo '  devenv start test'
+      echo
+      ;;
+
+    stop)
+      echo 'Stop the environment'
+      echo
+      echo 'Usage:'
+      echo '  devenv stop PROJECT_NAME'
+      echo
+      echo 'Example:'
+      echo '  devenv stop test'
+      echo
+      ;;
+
+    rm)
+      echo 'Remove the environment and the container image'
+      echo
+      echo 'Usage:'
+      echo '  devenv rm PROJECT_NAME'
+      echo
+      echo 'Example:'
+      echo '  devenv rm test'
+      echo
+      ;;
+      
+    create)
+      echo 'Create the environment by a Dockerfile'
+      echo
+      echo 'Usage:'
+      echo '  devenv create [options]'
+      echo
+      echo 'Example:'
+      echo '  devenv create -p test-project -d /home/user/project'
+      echo '  devenv create -p test-project -d /home/user/project -v /home/user:/host_home'
+      echo
+      echo 'Options:'
+      echo -e '  -p, --project string\t\t\tDefine the project name'
+      echo -e '  -d, --directory string\t\tDefine the project directory to bind mount into the environment'
+      echo -e '  -v, --volume string\t\t\tBind mount a volume into the environment'
+      echo -e '      --build-arg argument=value\targument=value to supply to the builder'
+      echo
+      ;;
+      
+    *)
+      echo "Dev Environment Manager $VERSION"
+      echo
+      echo 'Commands:'
+      echo -e '  enter\t\tEnter the environment'
+      echo -e '  start\t\tStart the environment in the background'
+      echo -e '  stop\t\tStop the environment'
+      echo -e '  rm\t\tRemove the environment and the container image'
+      echo -e '  create\tCreate the environment by a Dockerfile'
+      echo -e '  help\t\tShow the help page for the commands'
+      echo
+      if [ ! -z "$1" ]; then
+        echo 'Command not found'
+      fi
+      ;;
+  esac
+}
+
+function main() {
+  case $1 in
+    enter)
+      shift
+      enter $@
+      ;;
+
+    start)
+      shift
+      start $@
+      ;;
+
+    stop)
+      shift
+      stop $@
+      ;;
+
+    rm)
+      shift
+      remove $@
+      ;;
+      
+    create)
+      shift
+      create $@
+      ;;
+      
+    help)
+      shift
+      help $@
+      ;;
+      
+    *)
+      help
+  esac
+}
+
+main $@

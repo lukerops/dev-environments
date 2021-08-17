@@ -1,0 +1,54 @@
+FROM # change with debian/ubuntu based image
+
+## IMAGE REQUIREMENTS
+## Required to work propertly with devenv
+
+ARG TIMEZONE="America/Sao_Paulo"
+ARG USERNAME
+ARG UID
+ARG GROUPNAME
+ARG GID
+ARG PROJECT_NAME
+
+# softwares requirements
+RUN apt update && \
+    apt upgrade -y && \
+    apt install -y \
+        curl \
+        wget \
+        git \
+        openssh-client \
+        tmux \
+        sudo \
+        bash \
+        bash-completion \
+        build-essential \
+        fuse \
+        ncurses-term \
+        xclip \
+        docker.io \
+        docker-compose && \
+    rm -rf /var/lib/apt/lists/*
+
+# set timezone
+RUN echo "$TIMEZONE" > /etc/timezone
+
+# add user
+RUN groupadd --gid $GID $GROUPNAME && \
+    useradd --create-home --shell /bin/bash --uid $UID --gid $GID $USERNAME
+RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}_user
+USER $USERNAME
+RUN mkdir -p /home/$USERNAME/.local/bin /home/$USERNAME/.local/lib /home/$USERNAME/.local/share /home/$USERNAME/$PROJECT_NAME
+WORKDIR /home/$USERNAME/$PROJECT_NAME
+ENV PATH=/home/$USERNAME/.local/bin:$PATH
+RUN echo '\n\
+eval "$(ssh-agent -s)"\n\
+ssh-add $(ls ~/.ssh/id* | grep -oP "([^\s]*id[^\s]*[^\.pub])" | uniq)\n\
+' >> /home/$USERNAME/.bashrc
+
+ENV TERM=xterm-256color
+CMD ["tail", "-f", "/dev/null"]
+
+## PROJECT REQUIREMENTS
+
+# add all project requirements and container commands bellow
